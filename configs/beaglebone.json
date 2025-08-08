@@ -1,0 +1,38 @@
+{
+  "name": "BeagleBone Black",
+  "platform": "beaglebone",
+  "description": "BeagleBone Black with GPIO and I2C",
+  "i2c_bus": 2,
+  "pins": {
+    "reset": "P9_12",
+    "status_led": "P9_14", 
+    "sda": "P9_20",
+    "scl": "P9_19",
+    "interrupt": "P9_16"
+  },
+  "commands": {
+    "gpio_set_high": "echo 1 > /sys/class/gpio/gpio{pin}/value",
+    "gpio_set_low": "echo 0 > /sys/class/gpio/gpio{pin}/value",
+    "gpio_get": "cat /sys/class/gpio/gpio{pin}/value",
+    "i2c_read": "i2cget -y {bus} 0x{addr:02X} 0x{reg:02X}",
+    "i2c_write": "i2cset -y {bus} 0x{addr:02X} 0x{reg:02X} 0x{val:02X}",
+    "i2c_scan": "i2cdetect -y {bus}"
+  },
+  "pin_mapping": {
+    "P9_12": 60,
+    "P9_14": 50,
+    "P9_16": 51,
+    "P9_19": "I2C2_SCL",
+    "P9_20": "I2C2_SDA"
+  },
+  "setup_instructions": [
+    "Enable I2C2 in device tree",
+    "Configure pin muxing for I2C",
+    "Export GPIO pins: echo {pin} > /sys/class/gpio/export",
+    "Set GPIO direction: echo out > /sys/class/gpio/gpio{pin}/direction"
+  ],
+  "dependencies": {
+    "python_packages": ["smbus2"],
+    "system_packages": ["i2c-tools", "device-tree-compiler"]
+  }
+}

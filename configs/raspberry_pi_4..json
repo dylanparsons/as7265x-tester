@@ -1,0 +1,32 @@
+{
+  "name": "Raspberry Pi 4",
+  "platform": "raspberry_pi_4",
+  "description": "Standard Raspberry Pi 4 with GPIO control",
+  "i2c_bus": 3,
+  "i2c_config": "dtoverlay=i2c-gpio,bus=3,i2c_gpio_sda=02,i2c_gpio_scl=03,i2c_gpio_delay_us=1",
+  "pins": {
+    "reset": 5,
+    "status_led": 21,
+    "sda": 2,
+    "scl": 3,
+    "interrupt": 17
+  },
+  "commands": {
+    "gpio_set_high": "sudo raspi-gpio set {pin} op dh",
+    "gpio_set_low": "sudo raspi-gpio set {pin} op dl",
+    "gpio_get": "sudo raspi-gpio get {pin}",
+    "i2c_read": "i2cget -y {bus} 0x{addr:02X} 0x{reg:02X}",
+    "i2c_write": "i2cset -y {bus} 0x{addr:02X} 0x{reg:02X} 0x{val:02X}",
+    "i2c_scan": "i2cdetect -y {bus}"
+  },
+  "setup_instructions": [
+    "Add dtoverlay to /boot/config.txt",
+    "Enable I2C in raspi-config",
+    "Add user to gpio group: sudo usermod -a -G gpio $USER",
+    "Reboot after configuration changes"
+  ],
+  "dependencies": {
+    "python_packages": ["smbus2"],
+    "system_packages": ["python3-tk", "i2c-tools"]
+  }
+}
