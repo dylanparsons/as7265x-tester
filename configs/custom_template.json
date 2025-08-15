@@ -1,0 +1,35 @@
+{
+  "name": "Custom Platform Template",
+  "platform": "custom",
+  "description": "Template for adding new platforms",
+  "i2c_bus": 1,
+  "pins": {
+    "reset": 0,
+    "status_led": 0,
+    "sda": 0,
+    "scl": 0,
+    "interrupt": 0
+  },
+  "commands": {
+    "gpio_set_high": "# Command to set GPIO high",
+    "gpio_set_low": "# Command to set GPIO low",
+    "gpio_get": "# Command to read GPIO state",
+    "i2c_read": "# Command to read I2C register",
+    "i2c_write": "# Command to write I2C register", 
+    "i2c_scan": "# Command to scan I2C bus"
+  },
+  "communication": {
+    "type": "direct|serial|tcp|custom",
+    "parameters": {}
+  },
+  "setup_instructions": [
+    "Step 1: Configure hardware",
+    "Step 2: Install dependencies",
+    "Step 3: Test connections"
+  ],
+  "dependencies": {
+    "python_packages": [],
+    "system_packages": [],
+    "custom_drivers": []
+  }
+}

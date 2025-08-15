@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-Spectral Sensor Pre-Assembly Test GUI
-Professional test application for AS7265x Spectral Triad sensors
-Version 1.0.0 - Production Ready
+AS7265x Spectral Sensor Test GUI v1.1.0
+Multi-platform support with LED feedback
+
+Author: Dylan Parsons
+Created: August 2025
+Status: Open Source (MIT License)
+
+Background:
+Expanded to support multiple hardware platforms, JSON platform configs, 
+GPIO LED status patterns, and streamlined UI with integrated setup assistant.
 """
 
 import tkinter as tk
@@ -10,214 +17,100 @@ from tkinter import ttk, messagebox, scrolledtext
 import subprocess
 import threading
 import time
-from datetime import datetime
 import json
 import os
-
-# Try to import smbus2 - if not available, we'll use command line
-try:
-    import smbus2
-    HAVE_SMBUS = True
-except ImportError:
-    HAVE_SMBUS = False
-    print("Warning: smbus2 not available, using command line I2C")
-
-# Constants
-I2C_BUS = 3
-AS7263_ADDR = 0x49
-RESET_PIN = 5
+import glob
+from datetime import datetime
 
 # Application version
-APP_VERSION = "1.0.0"
-APP_DATE = "2024-12-19"
+APP_VERSION = "1.1.0"
+APP_DATE = "2025-08-14"
 
-# Virtual register addresses - CORRECTED from C++ header
-AS7263_REG_DEVICE_TYPE = 0x00      # Returns 0x40
-AS7263_REG_HW_VERSION = 0x01       # Returns 0x41
-AS7265X_DEVICE_TEMP = 0x06
-AS7265X_DEV_SELECT_CONTROL = 0x4F
+class PlatformManager:
+    def __init__(self):
+        self.configs = {}
+        self.current_platform = None
+        self.load_platform_configs()
+        
+    def load_platform_configs(self):
+        """Load all platform configuration files"""
+        config_dir = os.path.join(os.path.dirname(__file__), 'configs')
+        if not os.path.exists(config_dir):
+            os.makedirs(config_dir)
+            return
+            
+        for config_file in glob.glob(os.path.join(config_dir, '*.json')):
+            try:
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    platform_id = config.get('platform', os.path.basename(config_file)[:-5])
+                    self.configs[platform_id] = config
+            except Exception as e:
+                print("Error loading config " + config_file + ": " + str(e))
+                
+    def get_platforms(self):
+        """Get list of available platforms"""
+        return [(pid, config['name']) for pid, config in self.configs.items()]
+        
+    def select_platform(self, platform_id):
+        """Select and apply platform configuration"""
+        if platform_id in self.configs:
+            self.current_platform = self.configs[platform_id]
+            return True
+        return False
+        
+    def get_command(self, cmd_name, **kwargs):
+        """Get platform-specific command with parameter substitution"""
+        if not self.current_platform:
+            return None
+            
+        cmd_template = self.current_platform.get('commands', {}).get(cmd_name)
+        if not cmd_template:
+            return None
+            
+        # Add platform-specific parameters
+        params = {
+            'bus': self.current_platform.get('i2c_bus', 1),
+            'addr': 0x49,  # AS7265x address
+            **kwargs
+        }
+        
+        # Add pin numbers
+        pins = self.current_platform.get('pins', {})
+        params.update(pins)
+        
+        try:
+            return cmd_template.format(**params)
+        except KeyError as e:
+            print("Missing parameter for command template: " + str(e))
+            return None
 
-# I2C slave control registers
-I2C_AS72XX_SLAVE_STATUS_REG = 0x00
-I2C_AS72XX_SLAVE_WRITE_REG = 0x01
-I2C_AS72XX_SLAVE_READ_REG = 0x02
-I2C_AS72XX_SLAVE_TX_VALID = 0x02
-I2C_AS72XX_SLAVE_RX_VALID = 0x01
-
-# Device IDs
-AS72651_NIR = 0x00
-AS72652_VISIBLE = 0x01
-AS72653_UV = 0x02
-
-class SpectralTestGUI:
+class SpectralEvalGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Spectral Sensor Pre-Assembly Test")
-        self.root.geometry("800x650")
+        self.root.title("AS7265x Spectral Sensor Tester")
+        self.root.geometry("900x700")
         self.root.configure(bg='#f0f0f0')
         
+        self.platform_manager = PlatformManager()
         self.testing = False
         self.test_results = []
-        self.bus = None
         
         self.create_widgets()
-        self.init_i2c()
-        self.update_status()
+        self.populate_platform_selector()
         
-    def init_i2c(self):
-        """Initialize I2C bus"""
-        try:
-            if HAVE_SMBUS:
-                self.bus = smbus2.SMBus(I2C_BUS)
-                self.log_message("I2C bus initialized with smbus2", 'SUCCESS')
-            else:
-                self.log_message("Using command-line I2C tools", 'WARNING')
-        except Exception as e:
-            self.log_message("I2C initialization failed: " + str(e), 'ERROR')
-            
-    def run_command(self, command, timeout=5):
-        """Run shell command"""
-        try:
-            result = subprocess.run(command, shell=True, capture_output=True, 
-                                  text=True, timeout=timeout)
-            return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
-        except subprocess.TimeoutExpired:
-            return False, "", "Command timeout"
-        except Exception as e:
-            return False, "", str(e)
-            
-    def hardware_reset(self):
-        """Hardware reset using exact GPIO method"""
-        self.log_message("Performing hardware reset...")
-        
-        # Reset low
-        success, _, stderr = self.run_command("sudo raspi-gpio set " + str(RESET_PIN) + " op dl")
-        if not success:
-            self.log_message("Failed to set reset low: " + stderr, 'ERROR')
-            return False
-            
-        time.sleep(1)  # 1 second like your shell script
-        
-        # Reset high  
-        success, _, stderr = self.run_command("sudo raspi-gpio set " + str(RESET_PIN) + " op dh")
-        if not success:
-            self.log_message("Failed to set reset high: " + stderr, 'ERROR')
-            return False
-            
-        time.sleep(2)  # Let sensor boot
-        self.log_message("Hardware reset complete", 'SUCCESS')
-        return True
-        
-    def read_direct_register(self, reg):
-        """Read I2C register directly (not virtual)"""
-        if HAVE_SMBUS and self.bus:
-            try:
-                return self.bus.read_byte_data(AS7263_ADDR, reg)
-            except:
-                return None
-        else:
-            # Fallback to command line
-            cmd = "i2cget -y " + str(I2C_BUS) + " 0x" + format(AS7263_ADDR, '02X') + " 0x" + format(reg, '02X')
-            success, stdout, _ = self.run_command(cmd)
-            if success and stdout:
-                try:
-                    return int(stdout, 16)
-                except:
-                    return None
-            return None
-            
-    def write_direct_register(self, reg, value):
-        """Write I2C register directly (not virtual)"""
-        if HAVE_SMBUS and self.bus:
-            try:
-                self.bus.write_byte_data(AS7263_ADDR, reg, value)
-                return True
-            except:
-                return False
-        else:
-            # Fallback to command line
-            cmd = "i2cset -y " + str(I2C_BUS) + " 0x" + format(AS7263_ADDR, '02X') + " 0x" + format(reg, '02X') + " 0x" + format(value, '02X')
-            success, _, _ = self.run_command(cmd)
-            return success
-            
-    def read_virtual_register(self, virtual_reg):
-        """Read virtual register with proper timeout handling"""
-        try:
-            # Wait for TX buffer ready
-            for _ in range(50):  # 5 second timeout
-                status = self.read_direct_register(I2C_AS72XX_SLAVE_STATUS_REG)
-                if status is not None and (status & I2C_AS72XX_SLAVE_TX_VALID) == 0:
-                    break
-                time.sleep(0.1)
-            else:
-                return None
-                
-            # Send virtual register address
-            if not self.write_direct_register(I2C_AS72XX_SLAVE_WRITE_REG, virtual_reg):
-                return None
-                
-            # Wait for RX data ready
-            for _ in range(50):  # 5 second timeout
-                status = self.read_direct_register(I2C_AS72XX_SLAVE_STATUS_REG)
-                if status is not None and (status & I2C_AS72XX_SLAVE_RX_VALID) != 0:
-                    break
-                time.sleep(0.1)
-            else:
-                return None
-                
-            # Read the data
-            data = self.read_direct_register(I2C_AS72XX_SLAVE_READ_REG)
-            return data
-            
-        except Exception as e:
-            self.log_message("Virtual register read error: " + str(e), 'ERROR')
-            return None
-            
-    def write_virtual_register(self, virtual_reg, data):
-        """Write virtual register with proper timeout handling"""
-        try:
-            # Wait for TX buffer ready
-            for _ in range(50):
-                status = self.read_direct_register(I2C_AS72XX_SLAVE_STATUS_REG)
-                if status is not None and (status & I2C_AS72XX_SLAVE_TX_VALID) == 0:
-                    break
-                time.sleep(0.1)
-            else:
-                return False
-                
-            # Send virtual register address with write bit
-            if not self.write_direct_register(I2C_AS72XX_SLAVE_WRITE_REG, virtual_reg | 0x80):
-                return False
-                
-            # Wait for TX buffer ready again
-            for _ in range(50):
-                status = self.read_direct_register(I2C_AS72XX_SLAVE_STATUS_REG)
-                if status is not None and (status & I2C_AS72XX_SLAVE_TX_VALID) == 0:
-                    break
-                time.sleep(0.1)
-            else:
-                return False
-                
-            # Send the data
-            return self.write_direct_register(I2C_AS72XX_SLAVE_WRITE_REG, data)
-            
-        except Exception as e:
-            self.log_message("Virtual register write error: " + str(e), 'ERROR')
-            return False
-
     def create_widgets(self):
         """Create GUI widgets"""
-        # Title
-        title_frame = tk.Frame(self.root, bg='#2c3e50', height=80)
+        # Title frame
+        title_frame = tk.Frame(self.root, bg='#2c3e50', height=100)
         title_frame.pack(fill='x', padx=10, pady=(10,5))
         title_frame.pack_propagate(False)
         
-        title_label = tk.Label(title_frame, text="Spectral Sensor Pre-Assembly Test", 
+        title_label = tk.Label(title_frame, text="AS7265x Spectral Sensor Evaluation Tool", 
                               font=('Arial', 18, 'bold'), fg='white', bg='#2c3e50')
         title_label.pack(expand=True)
         
-        # Version label
-        version_label = tk.Label(title_frame, text="Version " + APP_VERSION + " (" + APP_DATE + ")", 
+        version_label = tk.Label(title_frame, text="Version " + APP_VERSION + " - Multi-Platform Support", 
                                font=('Arial', 10), fg='#bdc3c7', bg='#2c3e50')
         version_label.pack(side='bottom', pady=(0,5))
         
@@ -226,82 +119,91 @@ class SpectralTestGUI:
         main_frame.pack(fill='both', expand=True, padx=10, pady=5)
         
         # Left panel
-        left_panel = tk.LabelFrame(main_frame, text="Test Controls", font=('Arial', 12, 'bold'),
-                                  bg='#f0f0f0', pady=10)
+        left_panel = tk.LabelFrame(main_frame, text="Configuration & Control", 
+                                  font=('Arial', 12, 'bold'), bg='#f0f0f0', pady=10)
         left_panel.pack(side='left', fill='y', padx=(0,5))
         
-        # Connection status
-        self.status_frame = tk.Frame(left_panel, bg='#f0f0f0')
-        self.status_frame.pack(fill='x', pady=10)
+        # Platform selection with integrated setup
+        platform_frame = tk.LabelFrame(left_panel, text="Platform", bg='#f0f0f0')
+        platform_frame.pack(fill='x', pady=(0,10))
         
-        tk.Label(self.status_frame, text="Connection Status:", font=('Arial', 10, 'bold'),
+        # Platform dropdown with info button
+        platform_select_frame = tk.Frame(platform_frame, bg='#f0f0f0')
+        platform_select_frame.pack(fill='x', padx=5, pady=5)
+        
+        tk.Label(platform_select_frame, text="Hardware:", bg='#f0f0f0').pack(side='left')
+        self.platform_var = tk.StringVar()
+        self.platform_combo = ttk.Combobox(platform_select_frame, textvariable=self.platform_var, 
+                                          state='readonly', width=20)
+        self.platform_combo.pack(side='left', padx=(5,0), fill='x', expand=True)
+        self.platform_combo.bind('<<ComboboxSelected>>', self.on_platform_changed)
+        
+        # Setup info button (replaces redundant "Platform Setup" button)
+        setup_btn = tk.Button(platform_select_frame, text="ⓘ", width=3, 
+                             command=self.show_platform_setup, bg='#95a5a6', fg='white')
+        setup_btn.pack(side='right', padx=(5,0))
+        
+        # Compact platform info (replaces large text box)
+        self.platform_status = tk.Label(platform_frame, text="Select hardware platform", 
+                                       font=('Arial', 9), bg='#f0f0f0', fg='#666', 
+                                       wraplength=200, justify='left')
+        self.platform_status.pack(fill='x', padx=5, pady=(0,5))
+        
+        # Connection status
+        status_frame = tk.Frame(left_panel, bg='#f0f0f0')
+        status_frame.pack(fill='x', pady=10)
+        
+        tk.Label(status_frame, text="Connection Status:", font=('Arial', 10, 'bold'),
                 bg='#f0f0f0').pack()
         
-        self.status_label = tk.Label(self.status_frame, text="Checking...", 
+        self.status_label = tk.Label(status_frame, text="Select Platform First", 
                                    font=('Arial', 10), bg='#f0f0f0', fg='orange')
         self.status_label.pack()
         
-        # Test button
-        self.test_button = tk.Button(left_panel, text="START TEST", 
+        # Test controls
+        test_frame = tk.LabelFrame(left_panel, text="Test Control", bg='#f0f0f0')
+        test_frame.pack(fill='x', pady=10)
+        
+        self.test_button = tk.Button(test_frame, text="START TEST", 
                                    command=self.start_test, font=('Arial', 14, 'bold'),
                                    bg='#27ae60', fg='white', height=2, width=15)
-        self.test_button.pack(pady=20)
+        self.test_button.pack(pady=10)
+        self.test_button.config(state='disabled')
         
-        # Progress bar
-        self.progress = ttk.Progressbar(left_panel, mode='indeterminate')
-        self.progress.pack(fill='x', pady=10)
+        self.progress = ttk.Progressbar(test_frame, mode='indeterminate')
+        self.progress.pack(fill='x', pady=5)
         
-        # Test result indicator
-        result_frame = tk.Frame(left_panel, bg='#f0f0f0')
-        result_frame.pack(fill='x', pady=10)
+        # Test result
+        result_frame = tk.Frame(test_frame, bg='#f0f0f0')
+        result_frame.pack(fill='x', pady=5)
         
         tk.Label(result_frame, text="Test Result:", font=('Arial', 10, 'bold'),
                 bg='#f0f0f0').pack()
         
-        self.result_label = tk.Label(result_frame, text="Ready to test", 
+        self.result_label = tk.Label(result_frame, text="Ready", 
                                    font=('Arial', 12, 'bold'), bg='#f0f0f0', fg='gray')
         self.result_label.pack()
         
-        # Actions
+        # Streamlined actions (removed redundant buttons)
         actions_frame = tk.LabelFrame(left_panel, text="Actions", bg='#f0f0f0')
         actions_frame.pack(fill='x', pady=10)
+        
+        tk.Button(actions_frame, text="Test Connection", command=self.test_connection,
+                 bg='#3498db', fg='white').pack(fill='x', pady=2)
         
         tk.Button(actions_frame, text="Reset Sensor", command=self.reset_sensor,
                  bg='#f39c12', fg='white').pack(fill='x', pady=2)
         
-        tk.Button(actions_frame, text="Clear Log", command=self.clear_log,
-                 bg='#e74c3c', fg='white').pack(fill='x', pady=2)
+        tk.Button(actions_frame, text="Save Results", command=self.save_results,
+                 bg='#2ecc71', fg='white').pack(fill='x', pady=2)
         
-        tk.Button(actions_frame, text="Save Log", command=self.save_log,
-                 bg='#3498db', fg='white').pack(fill='x', pady=2)
-        
-        # Quick reference at bottom
-        fault_frame = tk.LabelFrame(left_panel, text="Quick Reference", bg='#f0f0f0', fg='#666')
-        fault_frame.pack(fill='x', pady=(10,0))
-        
-        fault_labels = [
-            ("✓ PASS", "Ready for assembly", 'green'),
-            ("✗ FAIL", "Sensor defective", 'red'),
-            ("i2c ERR", "Check connections", 'blue')
-        ]
-        
-        for icon, desc, color in fault_labels:
-            row = tk.Frame(fault_frame, bg='#f0f0f0')
-            row.pack(fill='x', padx=5, pady=2)
-            
-            tk.Label(row, text=icon, font=('Arial', 10), bg='#f0f0f0', 
-                    fg=color, width=12, anchor='w').pack(side='left')
-            tk.Label(row, text=desc, font=('Arial', 9), bg='#f0f0f0', 
-                    fg='#666', anchor='w').pack(side='left', fill='x', expand=True)
-        
-        # Right panel
-        right_panel = tk.LabelFrame(main_frame, text="Test Results", font=('Arial', 12, 'bold'),
-                                   bg='#f0f0f0')
+        # Right panel - Results
+        right_panel = tk.LabelFrame(main_frame, text="Test Results & Log", 
+                                   font=('Arial', 12, 'bold'), bg='#f0f0f0')
         right_panel.pack(side='right', fill='both', expand=True, padx=(5,0))
         
-        # Results display
-        self.results_text = scrolledtext.ScrolledText(right_panel, height=20, width=50,
-                                                     font=('Courier', 10))
+        self.results_text = scrolledtext.ScrolledText(right_panel, height=25, width=60,
+                                                     font=('Courier', 9))
         self.results_text.pack(fill='both', expand=True, pady=10)
         
         # Status bar
@@ -309,253 +211,167 @@ class SpectralTestGUI:
         status_bar.pack(fill='x', padx=10, pady=(0,10))
         status_bar.pack_propagate(False)
         
-        self.status_bar_label = tk.Label(status_bar, text="Ready - v" + APP_VERSION, fg='white', bg='#34495e')
+        self.status_bar_label = tk.Label(status_bar, text="Ready - v" + APP_VERSION, 
+                                        fg='white', bg='#34495e')
         self.status_bar_label.pack(side='left', padx=10, pady=5)
         
         self.test_counter_label = tk.Label(status_bar, text="Tests: 0", fg='white', bg='#34495e')
         self.test_counter_label.pack(side='right', padx=10, pady=5)
         
+    def populate_platform_selector(self):
+        """Populate platform selection dropdown"""
+        platforms = self.platform_manager.get_platforms()
+        if platforms:
+            platform_names = [name for pid, name in platforms]
+            self.platform_combo['values'] = platform_names
+            self.platform_combo.current(0)  # Select first platform by default
+            self.on_platform_changed()
+        else:
+            self.log_message("No platform configurations found in configs/ directory", 'ERROR')
+            
+    def on_platform_changed(self, event=None):
+        """Handle platform selection change"""
+        selection = self.platform_combo.current()
+        if selection >= 0:
+            platforms = self.platform_manager.get_platforms()
+            platform_id, platform_name = platforms[selection]
+            
+            if self.platform_manager.select_platform(platform_id):
+                self.log_message("Selected platform: " + platform_name)
+                self.update_platform_info()
+                self.test_button.config(state='normal')
+                self.update_connection_status()
+            else:
+                self.log_message("Failed to load platform: " + platform_name, 'ERROR')
+                
+    def update_platform_info(self):
+        """Update platform information display"""
+        if not self.platform_manager.current_platform:
+            return
+            
+        config = self.platform_manager.current_platform
+        # Compact status message instead of large text box
+        bus = config.get('i2c_bus', 'N/A')
+        reset_pin = config.get('pins', {}).get('reset', 'N/A')
+        status_text = "I2C: " + str(bus) + " | Reset: " + str(reset_pin)
+        
+        self.platform_status.config(text=status_text, fg='#2c3e50')
+        
+    def run_platform_command(self, cmd_name, **kwargs):
+        """Execute platform-specific command"""
+        cmd = self.platform_manager.get_command(cmd_name, **kwargs)
+        if not cmd:
+            return False, "", "Command not available for platform"
+            
+        try:
+            result = subprocess.run(cmd, shell=True, capture_output=True, 
+                                  text=True, timeout=10)
+            return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
+        except subprocess.TimeoutExpired:
+            return False, "", "Command timeout"
+        except Exception as e:
+            return False, "", str(e)
+            
+    def test_connection(self):
+        """Test platform connection and I2C communication"""
+        if not self.platform_manager.current_platform:
+            messagebox.showerror("Error", "No platform selected")
+            return
+            
+        self.log_message("Testing platform connection...")
+        
+        # Test I2C scan
+        success, stdout, stderr = self.run_platform_command('i2c_scan')
+        if success and "49" in stdout:
+            self.log_message("✓ AS7265x sensor detected at 0x49", 'SUCCESS')
+            self.status_label.config(text="✓ Sensor Connected", fg='green')
+        else:
+            self.log_message("✗ Sensor not detected on I2C bus", 'ERROR')
+            self.status_label.config(text="✗ No Sensor", fg='red')
+            
+    def reset_sensor(self):
+        """Reset sensor using platform-specific GPIO command"""
+        if not self.platform_manager.current_platform:
+            return
+            
+        self.log_message("Resetting sensor...")
+        
+        # Reset sequence
+        success1, _, _ = self.run_platform_command('gpio_set_low', pin=self.platform_manager.current_platform['pins']['reset'])
+        time.sleep(0.5)
+        success2, _, _ = self.run_platform_command('gpio_set_high', pin=self.platform_manager.current_platform['pins']['reset'])
+        
+        if success1 and success2:
+            self.log_message("✓ Sensor reset complete", 'SUCCESS')
+        else:
+            self.log_message("⚠ GPIO reset failed (check permissions)", 'WARNING')
+            
+    def flash_status_led(self, times=3):
+        """Flash status LED using platform commands"""
+        if not self.platform_manager.current_platform:
+            return
+            
+        led_pin = self.platform_manager.current_platform['pins']['status_led']
+        for _ in range(times):
+            self.run_platform_command('gpio_set_high', pin=led_pin)
+            time.sleep(0.1)
+            self.run_platform_command('gpio_set_low', pin=led_pin)
+            time.sleep(0.1)
+            
+    def show_platform_setup(self):
+        """Show platform setup instructions"""
+        if not self.platform_manager.current_platform:
+            messagebox.showwarning("Warning", "No platform selected")
+            return
+            
+        config = self.platform_manager.current_platform
+        setup_window = tk.Toplevel(self.root)
+        setup_window.title("Platform Setup - " + config['name'])
+        setup_window.geometry("600x400")
+        
+        setup_text = scrolledtext.ScrolledText(setup_window, wrap=tk.WORD)
+        setup_text.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        content = "Setup Instructions for " + config['name'] + "\n"
+        content += "=" * 50 + "\n\n"
+        
+        for step in config.get('setup_instructions', []):
+            content += "• " + step + "\n"
+            
+        content += "\nPin Configuration:\n"
+        for pin_name, pin_num in config.get('pins', {}).items():
+            content += "  " + pin_name + ": " + str(pin_num) + "\n"
+            
+        content += "\nDependencies:\n"
+        deps = config.get('dependencies', {})
+        if 'python_packages' in deps:
+            content += "  Python: " + ", ".join(deps['python_packages']) + "\n"
+        if 'system_packages' in deps:
+            content += "  System: " + ", ".join(deps['system_packages']) + "\n"
+            
+        setup_text.insert(1.0, content)
+        setup_text.config(state='disabled')
+        
+    def update_connection_status(self):
+        """Update connection status in background"""
+        def check():
+            self.test_connection()
+            
+        threading.Thread(target=check, daemon=True).start()
+        
     def log_message(self, message, level='INFO'):
-        """Add message to results"""
+        """Add message to results display"""
         timestamp = datetime.now().strftime('%H:%M:%S')
         self.results_text.insert(tk.END, "[" + timestamp + "] " + message + "\n")
         self.results_text.see(tk.END)
         self.root.update()
         
-    def update_status(self):
-        """Update connection status"""
-        def check():
-            # Simple test - try to read any register
-            data = self.read_direct_register(I2C_AS72XX_SLAVE_STATUS_REG)
-            if data is not None:
-                # Try virtual register read
-                hw_ver = self.read_virtual_register(AS7263_REG_HW_VERSION)
-                if hw_ver == 0x41:
-                    self.status_label.config(text="✓ Sensor Connected", fg='green')
-                elif hw_ver is not None:
-                    self.status_label.config(text="⚠ Wrong HW: 0x" + format(hw_ver, '02X'), fg='orange')
-                else:
-                    self.status_label.config(text="⚠ Virtual Reg Issue", fg='orange')
-            else:
-                self.status_label.config(text="✗ No I2C Response", fg='red')
-                
-        threading.Thread(target=check, daemon=True).start()
-        self.root.after(5000, self.update_status)
-        
-    def reset_sensor(self):
-        """Reset sensor"""
-        self.status_bar_label.config(text="Resetting...")
-        if self.hardware_reset():
-            self.status_bar_label.config(text="Reset complete - v" + APP_VERSION)
-        else:
-            self.status_bar_label.config(text="Reset failed - v" + APP_VERSION)
-            
-    def clear_log(self):
-        """Clear log"""
-        if messagebox.askyesno("Clear Log", "Clear the test log display?"):
-            self.results_text.delete(1.0, tk.END)
-            self.result_label.config(text="Ready to test", fg='gray')
-            self.log_message("Test log cleared")
-            
-    def save_log(self):
-        """Save current log to file"""
-        try:
-            # Create logs directory
-            logs_dir = os.path.expanduser("~/spectral_test_logs")
-            os.makedirs(logs_dir, exist_ok=True)
-            
-            # Save current log content
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_filename = os.path.join(logs_dir, "spectral_test_log_" + timestamp + ".txt")
-            
-            log_content = self.results_text.get(1.0, tk.END)
-            with open(log_filename, 'w') as f:
-                f.write("Spectral Sensor Pre-Assembly Test Log\n")
-                f.write("Application Version: " + APP_VERSION + " (" + APP_DATE + ")\n")
-                f.write("Generated: " + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\n")
-                f.write("=" * 60 + "\n\n")
-                f.write(log_content)
-                
-            self.log_message("Log saved to: " + log_filename, 'SUCCESS')
-            messagebox.showinfo("Log Saved", "Test log saved to:\n" + log_filename)
-            
-        except Exception as e:
-            self.log_message("Failed to save log: " + str(e), 'ERROR')
-            messagebox.showerror("Save Error", "Failed to save log:\n" + str(e))
-        
-    def test_basic_communication(self):
-        """Test basic I2C communication"""
-        self.log_message("Testing I2C communication...")
-        
-        # Test 1: Read status register
-        status = self.read_direct_register(I2C_AS72XX_SLAVE_STATUS_REG)
-        if status is not None:
-            self.log_message("✓ Status register: 0x" + format(status, '02X'), 'SUCCESS')
-        else:
-            self.log_message("✗ Cannot read status register", 'ERROR')
-            self.log_message("FAULT: Check 6-wire harness connections", 'ERROR')
-            self.log_message("FAULT: Verify 3.3V power supply", 'ERROR')
-            return False
-            
-        # Test 2: Read device type
-        device_type = self.read_virtual_register(AS7263_REG_DEVICE_TYPE)
-        if device_type == 0x40:
-            self.log_message("✓ Device type: 0x" + format(device_type, '02X'), 'SUCCESS')
-        elif device_type is not None:
-            self.log_message("⚠ Unexpected device type: 0x" + format(device_type, '02X'), 'WARNING')
-        else:
-            self.log_message("✗ Cannot read device type", 'ERROR')
-            return False
-            
-        # Test 3: Read hardware version
-        hw_ver = self.read_virtual_register(AS7263_REG_HW_VERSION)
-        if hw_ver == 0x41:
-            self.log_message("✓ Hardware version: 0x" + format(hw_ver, '02X'), 'SUCCESS')
-            return True
-        elif hw_ver is not None:
-            self.log_message("✗ Wrong hardware version: 0x" + format(hw_ver, '02X') + " (expected 0x41)", 'ERROR')
-            self.log_message("FAULT: Incorrect sensor type or firmware", 'ERROR')
-            return False
-        else:
-            self.log_message("✗ Cannot read hardware version", 'ERROR')
-            self.log_message("FAULT: Virtual register communication failed", 'ERROR')
-            return False
-            
-    def test_device_selection(self):
-        """Test device selection functionality"""
-        devices = [(AS72651_NIR, "NIR"), (AS72652_VISIBLE, "Visible"), (AS72653_UV, "UV")]
-        results = []
-        
-        self.log_message("Testing device selection...")
-        
-        for device_id, name in devices:
-            if self.write_virtual_register(AS7265X_DEV_SELECT_CONTROL, device_id):
-                time.sleep(0.2)  # Let device switch settle
-                
-                # Try to read temperature register
-                temp = self.read_virtual_register(AS7265X_DEVICE_TEMP)
-                
-                if temp is not None and 0 <= temp <= 85:
-                    self.log_message("✓ " + name + " sensor OK (temp: " + str(temp) + "°C)", 'SUCCESS')
-                    results.append(True)
-                elif temp is not None:
-                    self.log_message("⚠ " + name + " sensor temp: " + str(temp) + "°C (unusual)", 'WARNING')
-                    results.append(True)  # Still responding
-                else:
-                    self.log_message("✗ " + name + " sensor not responding", 'ERROR')
-                    results.append(False)
-            else:
-                self.log_message("✗ Cannot select " + name + " sensor", 'ERROR')
-                results.append(False)
-                
-        if not all(results):
-            self.log_message("FAULT: One or more spectral devices failed", 'ERROR')
-            
-        return all(results)
-        
-    def run_full_test(self):
-        """Run complete test sequence"""
-        test_start = datetime.now()
-        self.log_message("=" * 60)
-        self.log_message("SPECTRAL SENSOR PRE-ASSEMBLY TEST")
-        self.log_message("=" * 60)
-        
-        self.result_label.config(text="Testing...", fg='orange')
-        
-        test_result = {
-            'timestamp': test_start.isoformat(),
-            'app_version': APP_VERSION,
-            'app_date': APP_DATE,
-            'tests': {},
-            'overall_result': 'UNKNOWN'
-        }
-        
-        # Test sequence
-        tests = [
-            ("Hardware Reset", lambda: self.hardware_reset()),
-            ("I2C Communication", self.test_basic_communication),
-            ("Device Selection", self.test_device_selection)
-        ]
-        
-        all_passed = True
-        
-        for test_name, test_func in tests:
-            self.log_message("--- " + test_name + " Test ---")
-            self.status_bar_label.config(text="Testing: " + test_name)
-            
-            try:
-                passed = test_func()
-                test_result['tests'][test_name] = {'passed': passed}
-                    
-                if not passed:
-                    all_passed = False
-                    break  # Stop on first failure
-                    
-            except Exception as e:
-                self.log_message("✗ " + test_name + " test crashed: " + str(e), 'ERROR')
-                test_result['tests'][test_name] = {'passed': False, 'error': str(e)}
-                all_passed = False
-                break
-                
-        # Final result
-        test_result['overall_result'] = 'PASS' if all_passed else 'FAIL'
-        test_result['duration'] = (datetime.now() - test_start).total_seconds()
-        
-        self.log_message("\n" + "=" * 60)
-        if all_passed:
-            self.log_message("*** SENSOR TEST PASSED - READY FOR ASSEMBLY ***", 'SUCCESS')
-            self.result_label.config(text="✓ PASS", fg='green', font=('Arial', 14, 'bold'))
-            self.test_button.config(bg='#27ae60')
-        else:
-            self.log_message("*** SENSOR TEST FAILED - DO NOT ASSEMBLE ***", 'ERROR')
-            self.log_message("RECOMMENDATION: Mark sensor as defective", 'ERROR')
-            self.result_label.config(text="✗ FAIL", fg='red', font=('Arial', 14, 'bold'))
-            self.test_button.config(bg='#e74c3c')
-            
-        self.log_message("Test duration: " + str(round(test_result['duration'], 1)) + " seconds")
-        self.log_message("=" * 60)
-        
-        # Store result
-        self.test_results.append(test_result)
-        self.test_counter_label.config(text="Tests: " + str(len(self.test_results)))
-        
-        # Auto-save result
-        self.auto_save_result(test_result)
-        
-        return all_passed
-        
-    def auto_save_result(self, test_result):
-        """Automatically save test result"""
-        try:
-            # Create results directory
-            results_dir = os.path.expanduser("~/spectral_test_results")
-            os.makedirs(results_dir, exist_ok=True)
-            
-            # Save to daily results file
-            date_str = datetime.now().strftime('%Y%m%d')
-            results_file = os.path.join(results_dir, "spectral_results_" + date_str + ".json")
-            
-            # Read existing results or create new list
-            if os.path.exists(results_file):
-                with open(results_file, 'r') as f:
-                    daily_results = json.load(f)
-            else:
-                daily_results = []
-                
-            # Add new result
-            daily_results.append(test_result)
-            
-            # Write back to file
-            with open(results_file, 'w') as f:
-                json.dump(daily_results, f, indent=2, default=str)
-                
-            self.log_message(f"Result auto-saved to daily log", 'SUCCESS')
-            
-        except Exception as e:
-            self.log_message("Auto-save failed: " + str(e), 'ERROR')
-        
     def start_test(self):
-        """Start test in thread"""
+        """Start sensor test sequence"""
+        if not self.platform_manager.current_platform:
+            messagebox.showerror("Error", "No platform selected")
+            return
+            
         if self.testing:
             return
             
@@ -565,36 +381,59 @@ class SpectralTestGUI:
         
         def test_thread():
             try:
-                result = self.run_full_test()
-                if result:
-                    self.test_button.config(bg='#27ae60')
-                else:
-                    self.test_button.config(bg='#e74c3c')
+                self.run_sensor_test()
             finally:
                 self.testing = False
-                self.test_button.config(text="START TEST", state='normal')
+                self.test_button.config(text="START TEST", state='normal', bg='#27ae60')
                 self.progress.stop()
-                self.status_bar_label.config(text="Test complete - v" + APP_VERSION)
                 
         threading.Thread(target=test_thread, daemon=True).start()
         
-    def cleanup(self):
-        """Cleanup"""
-        if self.bus:
-            try:
-                self.bus.close()
-            except:
-                pass
+    def run_sensor_test(self):
+        """Run basic sensor test sequence"""
+        self.log_message("=" * 60)
+        self.log_message("STARTING AS7265x SENSOR TEST")
+        platform_name = self.platform_manager.current_platform['name']
+        self.log_message("Platform: " + platform_name)
+        self.log_message("=" * 60)
+        
+        # Flash LED to indicate test start
+        self.flash_status_led(3)
+        
+        # Basic I2C communication test
+        success, stdout, stderr = self.run_platform_command('i2c_scan')
+        if success and "49" in stdout:
+            self.log_message("✓ I2C communication successful", 'SUCCESS')
+            self.result_label.config(text="✓ PASS", fg='green')
+            self.flash_status_led(5)  # Success pattern
+        else:
+            self.log_message("✗ I2C communication failed", 'ERROR')
+            self.result_label.config(text="✗ FAIL", fg='red')
+            self.flash_status_led(2)  # Failure pattern
+            
+        self.log_message("Test complete")
+        
+    def save_results(self):
+        """Save test results to file"""
+        if not self.test_results:
+            messagebox.showwarning("Warning", "No test results to save")
+            return
+            
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        platform_name = self.platform_manager.current_platform['name'].replace(' ', '_')
+        filename = "as7265x_test_" + platform_name + "_" + timestamp + ".json"
+        
+        try:
+            with open(filename, 'w') as f:
+                json.dump(self.test_results, f, indent=2)
+            self.log_message("Results saved to: " + filename, 'SUCCESS')
+            messagebox.showinfo("Saved", "Results saved to:\n" + filename)
+        except Exception as e:
+            self.log_message("Save failed: " + str(e), 'ERROR')
 
 def main():
     root = tk.Tk()
-    app = SpectralTestGUI(root)
-    
-    def on_closing():
-        app.cleanup()
-        root.destroy()
-        
-    root.protocol("WM_DELETE_WINDOW", on_closing)
+    app = SpectralEvalGUI(root)
     root.mainloop()
 
 if __name__ == "__main__":

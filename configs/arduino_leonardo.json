@@ -1,0 +1,35 @@
+{
+  "name": "Arduino Leonardo",
+  "platform": "arduino_leonardo", 
+  "description": "Arduino Leonardo with serial communication",
+  "i2c_bus": "Wire",
+  "pins": {
+    "reset": 8,
+    "status_led": 13,
+    "sda": "SDA",
+    "scl": "SCL",
+    "interrupt": 7
+  },
+  "commands": {
+    "gpio_set_high": "digitalWrite({pin}, HIGH)",
+    "gpio_set_low": "digitalWrite({pin}, LOW)",
+    "gpio_get": "digitalRead({pin})",
+    "i2c_read": "Wire.requestFrom(0x{addr:02X}, 1); Wire.read()",
+    "i2c_write": "Wire.beginTransmission(0x{addr:02X}); Wire.write(0x{reg:02X}); Wire.write(0x{val:02X}); Wire.endTransmission()",
+    "i2c_scan": "Wire.begin(); // Scan addresses 1-127"
+  },
+  "communication": {
+    "type": "serial",
+    "baudrate": 115200,
+    "timeout": 5
+  },
+  "setup_instructions": [
+    "Upload AS7265x test firmware to Arduino",
+    "Connect via USB serial",
+    "Configure serial port permissions"
+  ],
+  "dependencies": {
+    "arduino_libraries": ["Wire", "AS726X"],
+    "python_packages": ["pyserial"]
+  }
+}
